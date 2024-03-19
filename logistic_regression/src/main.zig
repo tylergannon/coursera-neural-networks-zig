@@ -23,7 +23,10 @@ pub fn main() !void {
     try stdout.print("Run `zig build test` to run the tests.\n", .{});
 
     if (std.os.argv.len >= 4) {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.GeneralPurposeAllocator(.{
+            .thread_safe = false,
+            .safety = false,
+        }){};
 
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
@@ -41,7 +44,9 @@ pub fn main() !void {
         // const train_x = try read_data_set(train_x_fname, allocator);
         const model = Model{ .X = train_x, .Y = train_y };
         defer model.deinit(allocator);
-        const result = try model.optimize(allocator, 10000, 0.009, true);
+        const iter_arg = args.next();
+        const iterations: u32 = if (iter_arg) |num_str| try std.fmt.parseInt(u32, num_str, 10) else 5000;
+        const result = try model.optimize(allocator, iterations, 0.005, true);
         defer result.deinit(allocator);
 
         const test_model = TestModel{ .X = test_x, .Y = test_y };

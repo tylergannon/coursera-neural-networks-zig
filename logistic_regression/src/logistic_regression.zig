@@ -128,7 +128,7 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
             return Prediction{ .predictions = result };
         }
         pub fn propagate(self: Self, allocator: Allocator, parameters: *Parameters, bias: Precision) !PropagateResult {
-            const prediction = try self.getPrediction(allocator, parameters, bias);
+            const prediction: Prediction = try self.getPrediction(allocator, parameters, bias);
             defer prediction.deinit(allocator);
 
             var cost: Precision = 0.0;
