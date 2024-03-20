@@ -42,18 +42,20 @@ fn scalar_product(comptime len: comptime_int, A: *const [len]Precision, B: *cons
 pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime_int) type {
     const Sample = [num_features]Precision;
     const Parameters = [num_features]Precision;
+    const Prediction = [num_samples]Precision;
     const features_tail = num_features % VectorSize;
     const features_body = num_features - features_tail;
     const samples_tail = num_samples % VectorSize;
     const samples_body = num_samples - samples_tail;
+    const m: Precision = @floatFromInt(num_samples);
 
-    const Prediction = struct {
-        predictions: *[num_samples]Precision,
-        const Self = @This();
-        pub fn deinit(self: Self, allocator: Allocator) void {
-            allocator.destroy(self.predictions);
-        }
-    };
+    // const Prediction = struct {
+    //     predictions: *[num_samples]Precision,
+    //     const Self = @This();
+    //     pub fn deinit(self: Self, allocator: Allocator) void {
+    //         allocator.destroy(self.predictions);
+    //     }
+    // };
     const PropagateResult = struct {
         dw: *Parameters,
         db: Precision,
@@ -93,10 +95,12 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
         /// Returns the number of values in self.Y that are correctly
         pub fn testParameters(self: Self, allocator: Allocator, parameters: *Parameters, bias: Precision) !TestResult {
             var res: [num_samples]bool = undefined;
-            const prediction = try self.getPrediction(allocator, parameters, bias);
-            defer prediction.deinit(allocator);
+            const prediction: *Prediction = try allocator.create(Prediction);
+            defer allocator.destroy(prediction);
+            try self.getPrediction(prediction, parameters, bias);
+            // defer prediction.deinit(allocator);
             var total: Precision = 0.0;
-            for (prediction.predictions, 0..) |value, i| {
+            for (prediction, 0..) |value, i| {
                 const guess = value >= 0.5;
                 res[i] = guess == self.Y[i];
                 if (res[i]) {
@@ -109,12 +113,12 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
         /// This is defined as $\hat{y} = \sigma(w^{T}X + b)$.
         /// We'll do it once, quick and dirty, and see if we can see a route to using less memory
         /// in the computation.
-        pub fn getPrediction(self: Self, allocator: Allocator, parameters: *Parameters, bias: Precision) !Prediction {
+        pub fn getPrediction(self: Self, result: *Prediction, parameters: *Parameters, bias: Precision) !void {
             const zone = tracy.initZone(@src(), .{ .name = "Get Prediction" });
             defer zone.deinit();
 
-            var result = try allocator.create([num_samples]Precision);
-            errdefer allocator.destroy(result);
+            // var result = try allocator.create([num_samples]Precision);
+            // errdefer allocator.destroy(result);
             for (0..num_samples) |i| {
                 result[i] = scalar_product(num_features, parameters, &self.X[i]);
             }
@@ -131,57 +135,53 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
             const vec2: SamplesTailVector = samples_tail_ones / (samples_tail_ones + @exp(-vec1 - b1));
             result[samples_body..num_samples].* = vec2;
 
-            return Prediction{ .predictions = result };
+            // return Prediction{ .predictions = result };
         }
         pub fn propagate(self: Self, allocator: Allocator, parameters: *Parameters, bias: Precision) !PropagateResult {
             const zone = tracy.initZone(@src(), .{ .name = "Propagate Fn" });
             defer zone.deinit();
-            const prediction: Prediction = try self.getPrediction(allocator, parameters, bias);
-            defer prediction.deinit(allocator);
-            var a_minus_y: *[num_samples]Precision = try allocator.create([num_samples]Precision);
+            var prediction: Prediction = undefined;
+            try self.getPrediction(&prediction, parameters, bias);
+            // defer prediction.deinit(allocator);
+            var a_minus_y: [num_samples]Precision = undefined;
+            var dw: Sample = undefined;
             var cost: Precision = 0.0;
             var db: Precision = 0.0;
-            defer allocator.destroy(a_minus_y);
             {
                 for (self.Y, 0..) |is_class, idx| {
-                    a_minus_y[idx] = prediction.predictions[idx] - @as(Precision, if (is_class) 1 else 0);
+                    a_minus_y[idx] = (prediction[idx] - @as(Precision, if (is_class) 1 else 0)) / m;
                     db += a_minus_y[idx];
                     cost -= switch (is_class) {
-                        true => @log(prediction.predictions[idx]),
-                        false => @log(1.0 - prediction.predictions[idx]),
+                        true => @log(prediction[idx]),
+                        false => @log(1.0 - prediction[idx]),
                     };
                 }
-                db /= num_samples;
-                cost /= num_samples;
+                cost /= m;
             }
 
-            var dw: *Parameters = try allocator.create(Parameters);
-            errdefer allocator.destroy(dw);
+            for (0..num_features) |i| {
+                dw[i] = 0.0;
+            }
             {
                 const calc_dw_zone = tracy.initZone(@src(), .{ .name = "Backward Propagation" });
                 defer calc_dw_zone.deinit();
-                for (0..num_features) |feat_idx| {
-                    // Do a scalar product in-place to avoid copying data around too much.
-                    // const dw_feature_zone = tracy.initZone(@src(), .{ .name = "Back propagating a single feature" });
-                    // defer dw_feature_zone.deinit();
-                    var sample_idx: usize = 0;
-                    var res: Precision = 0.0;
-                    while (sample_idx < samples_body) : (sample_idx += VectorSize) {
-                        const vec_zone = tracy.initZone(@src(), .{ .name = "Build vec1" });
-                        var vec1: FullVector = undefined;
-                        inline for (0..VectorSize) |i| {
-                            vec1[i] = self.X[sample_idx + i][feat_idx];
-                        }
-                        // const vec2_zone = tracy.initZone(@src(), .{ .name = "Get second vector and reduce" });
-                        // defer vec2_zone.deinit();
-                        const vec2: FullVector = a_minus_y[sample_idx..][0..VectorSize].*;
-                        vec_zone.deinit();
-                        res += @reduce(.Add, vec1 * vec2);
+                for (self.X, 0..) |row, sample_idx| {
+                    const a_star = a_minus_y[sample_idx];
+                    var i: usize = 0;
+                    const a_vec: FullVector = @splat(a_star);
+                    while (i < features_body) : (i += VectorSize) {
+                        const vec1: FullVector = @as(FullVector, row[i..][0..VectorSize].*) * a_vec;
+                        const vec2: FullVector = dw[i..][0..VectorSize].*;
+                        dw[i..][0..VectorSize].* = vec1 + vec2;
                     }
-                    dw[feat_idx] = res / num_samples;
+                    const vec1: FeaturesTailVector = @as(FeaturesTailVector, row[features_body..num_features].*) * @as(FeaturesTailVector, @splat(a_star));
+                    const vec2: FeaturesTailVector = dw[features_body..num_features].*;
+                    dw[features_body..num_features].* = vec1 + vec2;
                 }
             }
-            return PropagateResult{ .dw = dw, .cost = cost, .db = db };
+            const dw2: *Parameters = try allocator.create(Parameters);
+            @memcpy(dw2, &dw);
+            return PropagateResult{ .dw = dw2, .cost = cost, .db = db };
         }
         pub fn optimize(self: Self, allocator: Allocator, num_iterations: u32, learning_rate: Precision, comptime print_res: bool) !OptimizeResult {
             const optimize_zone = tracy.initZone(@src(), .{ .name = "Inside optimize" });
@@ -323,8 +323,9 @@ const TestScalarProduct = struct {
         for (0..features) |i| {
             initial_params[i] = 0.12344;
         }
-        const prediction = try my_model.getPrediction(allocator, initial_params, b);
-        defer prediction.deinit(allocator);
+        const prediction: [samples]Precision = undefined;
+        try my_model.getPrediction(&prediction, initial_params, b);
+        // defer prediction.deinit(allocator);
 
         const propagate = try my_model.propagate(allocator, initial_params, b);
         defer propagate.deinit(allocator);
