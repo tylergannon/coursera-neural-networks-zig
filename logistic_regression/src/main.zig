@@ -1,6 +1,7 @@
 const std = @import("std");
 const load = @import("./load_data.zig");
 const regression = @import("./logistic_regression.zig");
+const tracy = @import("tracy");
 
 const ATTRIBUTE_COUNT_N = 12288;
 const SAMPLE_SIZE = 209;
@@ -10,6 +11,7 @@ const Model = regression.model(ATTRIBUTE_COUNT_N, SAMPLE_SIZE);
 const TestModel = regression.model(ATTRIBUTE_COUNT_N, TEST_SAMPLE_SIZE);
 
 pub fn main() !void {
+    tracy.setThreadName("Main");
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 

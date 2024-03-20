@@ -15,12 +15,20 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const tracy = b.dependency("tracy", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "ml",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
     });
+    exe.root_module.addImport("tracy", tracy.module("tracy"));
+    exe.linkLibrary(tracy.artifact("tracy"));
+    exe.linkLibCpp();
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

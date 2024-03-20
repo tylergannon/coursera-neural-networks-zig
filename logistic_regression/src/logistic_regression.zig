@@ -1,4 +1,5 @@
 const std = @import("std");
+const tracy = @import("tracy");
 const expectEqual = std.testing.expectEqual;
 
 const Allocator = std.mem.Allocator;
@@ -18,6 +19,8 @@ fn one_vector_sigmoid(comptime len: comptime_int, vector: vectorType(len)) vecto
 
 /// Returns the scalar result of multiplying piecewise components of A and B, and summing their results.
 fn scalar_product(comptime len: comptime_int, A: *const [len]Precision, B: *const [len]Precision) Precision {
+    const zone = tracy.initZone(@src(), .{ .name = "Scalar Product" });
+    defer zone.deinit();
     const tail_len: usize = len % VectorSize;
     const body_len: usize = len - tail_len;
     // std.debug.print("Begin\n\n", .{});
@@ -107,6 +110,9 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
         /// We'll do it once, quick and dirty, and see if we can see a route to using less memory
         /// in the computation.
         pub fn getPrediction(self: Self, allocator: Allocator, parameters: *Parameters, bias: Precision) !Prediction {
+            const zone = tracy.initZone(@src(), .{ .name = "Get Prediction" });
+            defer zone.deinit();
+
             var result = try allocator.create([num_samples]Precision);
             errdefer allocator.destroy(result);
             for (0..num_samples) |i| {
@@ -128,43 +134,59 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
             return Prediction{ .predictions = result };
         }
         pub fn propagate(self: Self, allocator: Allocator, parameters: *Parameters, bias: Precision) !PropagateResult {
+            const zone = tracy.initZone(@src(), .{ .name = "Propagate Fn" });
+            defer zone.deinit();
             const prediction: Prediction = try self.getPrediction(allocator, parameters, bias);
             defer prediction.deinit(allocator);
-
-            var cost: Precision = 0.0;
             var a_minus_y: *[num_samples]Precision = try allocator.create([num_samples]Precision);
-            defer allocator.destroy(a_minus_y);
+            var cost: Precision = 0.0;
             var db: Precision = 0.0;
-            for (self.Y, 0..) |is_class, idx| {
-                a_minus_y[idx] = prediction.predictions[idx] - @as(Precision, if (is_class) 1 else 0);
-                db += a_minus_y[idx];
-                cost -= switch (is_class) {
-                    true => @log(prediction.predictions[idx]),
-                    false => @log(1.0 - prediction.predictions[idx]),
-                };
+            defer allocator.destroy(a_minus_y);
+            {
+                for (self.Y, 0..) |is_class, idx| {
+                    a_minus_y[idx] = prediction.predictions[idx] - @as(Precision, if (is_class) 1 else 0);
+                    db += a_minus_y[idx];
+                    cost -= switch (is_class) {
+                        true => @log(prediction.predictions[idx]),
+                        false => @log(1.0 - prediction.predictions[idx]),
+                    };
+                }
+                db /= num_samples;
+                cost /= num_samples;
             }
-            db /= num_samples;
-            cost /= num_samples;
 
             var dw: *Parameters = try allocator.create(Parameters);
             errdefer allocator.destroy(dw);
-            for (0..num_features) |feat_idx| {
-                // Do a scalar product in-place to avoid copying data around too much.
-                var sample_idx: usize = 0;
-                var res: Precision = 0.0;
-                while (sample_idx < samples_body) : (sample_idx += VectorSize) {
-                    var vec1: FullVector = undefined;
-                    for (0..VectorSize) |i| {
-                        vec1[i] = self.X[sample_idx + i][feat_idx];
+            {
+                const calc_dw_zone = tracy.initZone(@src(), .{ .name = "Backward Propagation" });
+                defer calc_dw_zone.deinit();
+                for (0..num_features) |feat_idx| {
+                    // Do a scalar product in-place to avoid copying data around too much.
+                    // const dw_feature_zone = tracy.initZone(@src(), .{ .name = "Back propagating a single feature" });
+                    // defer dw_feature_zone.deinit();
+                    var sample_idx: usize = 0;
+                    var res: Precision = 0.0;
+                    while (sample_idx < samples_body) : (sample_idx += VectorSize) {
+                        const vec_zone = tracy.initZone(@src(), .{ .name = "Build vec1" });
+                        var vec1: FullVector = undefined;
+                        inline for (0..VectorSize) |i| {
+                            vec1[i] = self.X[sample_idx + i][feat_idx];
+                        }
+                        // const vec2_zone = tracy.initZone(@src(), .{ .name = "Get second vector and reduce" });
+                        // defer vec2_zone.deinit();
+                        const vec2: FullVector = a_minus_y[sample_idx..][0..VectorSize].*;
+                        vec_zone.deinit();
+                        res += @reduce(.Add, vec1 * vec2);
                     }
-                    const vec2: FullVector = a_minus_y[sample_idx..][0..VectorSize].*;
-                    res += @reduce(.Add, vec1 * vec2);
+                    dw[feat_idx] = res / num_samples;
                 }
-                dw[feat_idx] = res / num_samples;
             }
             return PropagateResult{ .dw = dw, .cost = cost, .db = db };
         }
         pub fn optimize(self: Self, allocator: Allocator, num_iterations: u32, learning_rate: Precision, comptime print_res: bool) !OptimizeResult {
+            const optimize_zone = tracy.initZone(@src(), .{ .name = "Inside optimize" });
+            defer optimize_zone.deinit();
+
             var w: *Parameters = try allocator.create(Parameters);
             errdefer allocator.destroy(w);
             for (0..num_features) |i| {
@@ -176,10 +198,14 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
             var b: Precision = 0.0;
             var cost: Precision = 0.0;
             for (0..num_iterations) |iter| {
+                const loop_zone = tracy.initZone(@src(), .{ .name = "Optimize Loop" });
+                defer loop_zone.deinit();
+
                 const prop = try self.propagate(allocator, w, b);
                 defer prop.deinit(allocator);
                 cost = prop.cost;
                 b -= learning_rate * prop.db;
+                const calc_w_zone = tracy.initZone(@src(), .{ .name = "Calculate dw" });
                 var i: usize = 0;
                 while (i < features_body) : (i += VectorSize) {
                     const wi = w[i..];
@@ -191,6 +217,7 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
                 const vec1: FeaturesTailVector = w[features_body..num_features].*;
                 const vec2: FeaturesTailVector = prop.dw[features_body..num_features].*;
                 w[features_body..num_features].* = vec1 - (vec2 * @as(FeaturesTailVector, @splat(learning_rate)));
+                calc_w_zone.deinit();
                 if (print_res and iter % 100 == 0) {
                     std.debug.print("Finished {d} iterations.  Cost is {d}\n", .{ iter, cost });
                 }
