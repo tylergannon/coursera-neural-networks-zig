@@ -18,22 +18,20 @@ fn one_vector_sigmoid(comptime len: comptime_int, vector: vectorType(len)) vecto
 }
 
 /// Returns the scalar result of multiplying piecewise components of A and B, and summing their results.
-fn scalar_product(comptime len: comptime_int, A: *const [len]Precision, B: *const [len]Precision) Precision {
-    const zone = tracy.initZone(@src(), .{ .name = "Scalar Product" });
-    defer zone.deinit();
+fn scalar_product(comptime len: comptime_int, parameters: *const [len]Precision, sample: *const [len]Precision) Precision {
     const tail_len: usize = len % VectorSize;
     const body_len: usize = len - tail_len;
-    // std.debug.print("Begin\n\n", .{});
+    const zone = tracy.initZone(@src(), .{ .name = "Reading the vectors" });
+    defer zone.deinit();
     var i: usize = 0;
     var res: Precision = 0.0;
     while (i < body_len) : (i += VectorSize) {
-        const vec1: FullVector = A[i..][0..VectorSize].*;
-        const vec2: FullVector = B[i..][0..VectorSize].*;
-        // std.debug.print("vec1 * vec2 = {d} * {d} = {d}, then add them and get {d}\n", .{ vec1, vec2, vec1 * vec2, @reduce(.Add, vec1 * vec2) });
+        const vec1: FullVector = parameters[i..][0..VectorSize].*;
+        const vec2: FullVector = sample[i..][0..VectorSize].*;
         res += @reduce(.Add, vec1 * vec2);
     }
     for (body_len..len) |j| {
-        res += A[j] * B[j];
+        res += parameters[j] * sample[j];
     }
     // std.debug.print("End.  Got {d}\n\n", .{res});
     return res;
@@ -119,9 +117,11 @@ pub fn model(comptime num_features: comptime_int, comptime num_samples: comptime
 
             // var result = try allocator.create([num_samples]Precision);
             // errdefer allocator.destroy(result);
+            const scalar_zone = tracy.initZone(@src(), .{ .name = "Scalar Product" });
             for (0..num_samples) |i| {
                 result[i] = scalar_product(num_features, parameters, &self.X[i]);
             }
+            scalar_zone.deinit();
 
             var i: usize = 0;
             const b: FullVector = @splat(bias);
